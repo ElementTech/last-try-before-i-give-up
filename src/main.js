@@ -7,11 +7,12 @@ import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
 import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js";
 import { ShaderPass } from "three/addons/postprocessing/ShaderPass.js";
 import { OutputPass } from "three/addons/postprocessing/OutputPass.js";
+import { Sky } from "three/addons/objects/Sky.js";
+import { Water } from "three/addons/objects/Water.js";
 import { config } from "./config.js";
 
 // Scene setup
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(config.sky.color);
 scene.fog = new THREE.FogExp2(config.sky.fogColor, config.sky.fogDensity);
 
 const camera = new THREE.PerspectiveCamera(
@@ -98,6 +99,24 @@ fillLight.position.set(
   config.lighting.fill.position.z,
 );
 scene.add(fillLight);
+
+// Sky setup
+const sky = new Sky();
+sky.scale.setScalar(450000);
+scene.add(sky);
+
+const skyUniforms = sky.material.uniforms;
+skyUniforms['turbidity'].value = config.sky.turbidity;
+skyUniforms['rayleigh'].value = config.sky.rayleigh;
+skyUniforms['mieCoefficient'].value = config.sky.mieCoefficient;
+skyUniforms['mieDirectionalG'].value = config.sky.mieDirectionalG;
+
+// Sun position from config
+const sun = new THREE.Vector3();
+const phi = THREE.MathUtils.degToRad(90 - config.sky.sunElevation);
+const theta = THREE.MathUtils.degToRad(config.sky.sunAzimuth);
+sun.setFromSphericalCoords(1, phi, theta);
+skyUniforms['sunPosition'].value.copy(sun);
 
 // Loaders
 const textureLoader = new THREE.TextureLoader();
@@ -228,6 +247,22 @@ function generateHeightFromImage(
     data[i] = heightValue * hm.heightScale + hm.heightOffset;
   }
 
+  // Calculate min/max heights and suggested water level
+  let minH = Infinity,
+    maxH = -Infinity;
+  for (let i = 0; i < data.length; i++) {
+    if (data[i] < minH) minH = data[i];
+    if (data[i] > maxH) maxH = data[i];
+  }
+  console.log("Terrain height range:", minH.toFixed(1), "to", maxH.toFixed(1));
+
+  // Store for water level calculation
+  window.terrainMinHeight = minH;
+  window.terrainMaxHeight = maxH;
+  // Rivers should be in the lower 20% of the height range
+  window.suggestedWaterLevel = minH + (maxH - minH) * 0.18;
+  console.log("Suggested water level:", window.suggestedWaterLevel.toFixed(1));
+
   return data;
 }
 
@@ -338,10 +373,66 @@ function updateTerrainGeometry() {
 updateTerrainGeometry();
 
 // Load heightmap and rebuild terrain when ready
+let vegetationCreated = false;
+let waterCreated = false;
 loadHeightmap().then(() => {
   updateTerrainGeometry();
   console.log("Terrain updated with heightmap data");
+
+  // Recreate water at the correct height based on terrain
+  if (!waterCreated && window.suggestedWaterLevel) {
+    waterCreated = true;
+    // Remove old water if exists
+    if (window.currentWater) {
+      scene.remove(window.currentWater);
+    }
+    const waterResult = createWater(window.suggestedWaterLevel);
+    window.currentWater = waterResult.water;
+    window.currentWaterMaterial = waterResult.material;
+  }
+
+  // Create vegetation AFTER heightmap is loaded so placement is correct
+  if (!vegetationCreated) {
+    vegetationCreated = true;
+    createAllVegetation();
+  }
 });
+
+// Function to create all vegetation (called after heightmap loads)
+function createAllVegetation() {
+  console.log("Creating vegetation with loaded heightmap...");
+  createInstancedDeciduousTrees();
+  createInstancedCypressTrees();
+  createInstancedBushes();
+  createInstancedGroundCover();
+  createInstancedGrass();
+  placeProceduralRocks();
+  console.log("Vegetation creation complete");
+}
+
+function placeProceduralRocks() {
+  const prc = config.rocks.procedural;
+  const waterLevel =
+    window.suggestedWaterLevel || config.waterPlane?.height || 45;
+  for (let i = 0; i < prc.count; i++) {
+    let x, z, height;
+    let attempts = 0;
+    do {
+      x = (Math.random() - 0.5) * worldSize * 0.9;
+      z = (Math.random() - 0.5) * worldSize * 0.9;
+      height = getHeightAt(x, z);
+      attempts++;
+    } while (height < waterLevel + 5 && attempts < 30);
+
+    if (height >= waterLevel + 5) {
+      const rock = createRock(
+        prc.scale.min + Math.random() * (prc.scale.max - prc.scale.min),
+      );
+      rock.position.set(x, height, z);
+      scene.add(rock);
+    }
+  }
+}
 
 // Build terrain shader from config
 const tc = config.terrainColors;
@@ -645,33 +736,62 @@ const terrainMaterial = new THREE.ShaderMaterial({
       vec2 worldUV = vWorldPosition.xz * textureScale;
       float fineDetail = noise(vWorldPosition.xz * detailNoiseScale);
       float height = vHeight;
-      float slope = 1.0 - vNormal.y;
+      float slope = 1.0 - vNormal.y; // 0 = flat, 1 = vertical
 
-      // Sample splatmap using UV coordinates (maps directly to terrain)
-      vec3 splatmapColor = texture2D(splatmapTex, vUv).rgb;
+      // Multi-scale texture sampling for variation
+      vec3 dirtBase = sampleMultiScale(dirtTexture, vWorldPosition.xz, textureScale, textureScale2, textureScale3, multiScaleBlend);
+      vec3 grassBase = sampleMultiScale(grassTexture, vWorldPosition.xz * 0.8, textureScale, textureScale2, textureScale3, multiScaleBlend);
+      vec3 forestBase = sampleMultiScale(forestTexture, vWorldPosition.xz * 0.6, textureScale, textureScale2, textureScale3, multiScaleBlend);
 
-      // If using splatmap, use it directly as the base color
-      vec3 baseColor;
-      if (useSplatmap > 0.5) {
-        // Use splatmap color directly, boost saturation slightly
-        baseColor = splatmapColor;
-        // Add subtle texture detail from dirt texture for surface variation
-        vec3 detailTex = texture2D(dirtTexture, worldUV * 2.0).rgb;
-        baseColor *= 0.85 + detailTex * 0.3;
-      } else {
-        // Procedural coloring fallback
-        vec3 dirtBase = texture2D(dirtTexture, worldUV).rgb;
-        vec3 grassBase = texture2D(grassTexture, worldUV * 0.8).rgb;
+      // Apply color tints
+      vec3 dirt = dirtBase * dirtColor;
+      vec3 dirtPath = dirtBase * dirtPathColor;
+      vec3 grass = grassBase * grassColor;
+      vec3 darkGrass = grassBase * darkGrassColor;
+      vec3 forest = forestBase * forestColor;
 
-        vec3 dirt = dirtBase * dirtColor;
-        vec3 grass = grassBase * grassColor;
+      // Noise for natural variation
+      float n1 = fbm(vWorldPosition.xz * fbmScale1);
+      float n2 = fbm(vWorldPosition.xz * fbmScale2 + 50.0);
+      float n3 = noise(vWorldPosition.xz * largeNoiseScale + 100.0);
 
-        float n1 = fbm(vWorldPosition.xz * fbmScale1);
-        float grassMask = smoothstep(grassThresh1Min, grassThresh1Max, n1);
+      // Grass mask - most of terrain should be grass
+      float grassMask = smoothstep(grassThresh1Min, grassThresh1Max, n1);
+      grassMask *= smoothstep(grassThresh2Min, grassThresh2Max, n2);
+      grassMask = pow(grassMask, grassContrast);
 
-        baseColor = mix(dirt, grass, grassMask * grassStrength);
-      }
+      // Forest patches
+      float forestMask = smoothstep(forestThreshMin, forestThreshMax, n3) * forestStrength;
 
+      // Path generation
+      float pathVal = pathNoise(vWorldPosition.xz);
+      float pathMask = 1.0 - smoothstep(pathWidthMin, pathWidthMax, pathVal);
+
+      // Rock on steep slopes
+      vec3 rock = dirtBase * rockColor;
+      float slopeMask = smoothstep(rockSlopeThreshold - 0.15, rockSlopeThreshold + 0.1, slope);
+      slopeMask *= 0.7 + noise(vWorldPosition.xz * 0.05) * 0.5;
+      slopeMask = clamp(slopeMask, 0.0, 1.0);
+
+      // Start with lush grass as base
+      vec3 baseColor = grass;
+
+      // Add darker grass variation
+      baseColor = mix(baseColor, darkGrass, forestMask * 0.6);
+
+      // Add forest floor in dense areas
+      baseColor = mix(baseColor, forest, forestMask * 0.4);
+
+      // Dirt patches where grass is sparse
+      baseColor = mix(baseColor, dirt, (1.0 - grassMask) * 0.7);
+
+      // Paths cut through
+      baseColor = mix(baseColor, dirtPath, pathMask * pathStrength * 0.8);
+
+      // Rock on steep slopes
+      baseColor = mix(baseColor, rock, slopeMask);
+
+      // Lighting
       float NdotL = max(dot(vNormal, sunDirection), 0.0);
       float diffuse = NdotL * diffuseStrength;
       float heightAO = smoothstep(aoRangeMin, aoRangeMax, vHeight) * aoStrength + (1.0 - aoStrength);
@@ -681,6 +801,7 @@ const terrainMaterial = new THREE.ShaderMaterial({
 
       float lighting = (ambientStrength + diffuse * shadow) * heightAO;
 
+      // Fine detail and color grading
       baseColor *= 0.9 + fineDetail * 0.2;
       baseColor *= warmTint;
       baseColor = pow(baseColor, vec3(contrast));
@@ -695,139 +816,47 @@ terrain.receiveShadow = true;
 scene.add(terrain);
 
 // Water
-function createWater() {
-  const w = config.water;
-  const waterHeight = config.waterPlane?.height || 8;
+function createWater(customHeight = null) {
+  const waterHeight =
+    customHeight !== null ? customHeight : config.waterPlane?.height || 45;
 
-  // Create a simple flat water plane covering the entire terrain
-  const waterGeometry = new THREE.PlaneGeometry(
-    worldSize * 1.2,
-    worldSize * 1.2,
-    64,
-    64,
+  console.log("Creating water at height:", waterHeight);
+
+  // Create water plane geometry
+  const waterGeometry = new THREE.PlaneGeometry(worldSize * 1.2, worldSize * 1.2);
+
+  // Load water normals texture
+  const waterNormals = textureLoader.load(
+    'https://raw.githubusercontent.com/mrdoob/three.js/master/examples/textures/waternormals.jpg',
+    (texture) => {
+      texture.wrapS = texture.wrapT = THREE.RepeatWrapping;
+    }
   );
-  waterGeometry.rotateX(-Math.PI / 2);
 
-  // Position the water plane at the configured height
-  waterGeometry.translate(0, waterHeight, 0);
-
-  const waterMaterial = new THREE.ShaderMaterial({
-    uniforms: {
-      time: { value: 0 },
-      waterColor: { value: new THREE.Color(w.color) },
-      camPos: { value: camera.position },
-      opacity: { value: w.opacity },
-      waveSpeedX: { value: w.waveSpeed.x },
-      waveSpeedZ: { value: w.waveSpeed.z },
-      waveSpeedCombined: { value: w.waveSpeed.combined },
-      waveAmpX: { value: w.waveAmplitude.x },
-      waveAmpZ: { value: w.waveAmplitude.z },
-      waveAmpCombined: { value: w.waveAmplitude.combined },
-      waveFreqX: { value: w.waveFrequency.x },
-      waveFreqZ: { value: w.waveFrequency.z },
-      waveFreqCombinedX: { value: w.waveFrequency.combined.x },
-      waveFreqCombinedZ: { value: w.waveFrequency.combined.z },
-      fresnelPower: { value: w.fresnel.power },
-      fresnelSkyBlend: { value: w.fresnel.skyBlend },
-      specPower: { value: w.specular.power },
-      specIntensity: { value: w.specular.intensity },
-      sparkleScale: { value: w.sparkle.scale },
-      sparkleSpeed: { value: w.sparkle.speed },
-      sparklePower: { value: w.sparkle.power },
-      sparkleIntensity: { value: w.sparkle.intensity },
-    },
-    vertexShader: `
-      varying vec2 vUv;
-      varying vec3 vWorldPosition;
-      varying vec3 vNormal;
-      uniform float time;
-      uniform float waveSpeedX;
-      uniform float waveSpeedZ;
-      uniform float waveSpeedCombined;
-      uniform float waveAmpX;
-      uniform float waveAmpZ;
-      uniform float waveAmpCombined;
-      uniform float waveFreqX;
-      uniform float waveFreqZ;
-      uniform float waveFreqCombinedX;
-      uniform float waveFreqCombinedZ;
-
-      void main() {
-        vUv = uv;
-        vNormal = normalize(normalMatrix * normal);
-        vec3 pos = position;
-        pos.y += sin(pos.x * waveFreqX + time * waveSpeedX) * waveAmpX;
-        pos.y += sin(pos.z * waveFreqZ + time * waveSpeedZ) * waveAmpZ;
-        pos.y += cos(pos.x * waveFreqCombinedX + pos.z * waveFreqCombinedZ + time * waveSpeedCombined) * waveAmpCombined;
-        vec4 worldPos = modelMatrix * vec4(pos, 1.0);
-        vWorldPosition = worldPos.xyz;
-        gl_Position = projectionMatrix * viewMatrix * worldPos;
-      }
-    `,
-    fragmentShader: `
-      uniform vec3 waterColor;
-      uniform float time;
-      uniform vec3 camPos;
-      uniform float opacity;
-      uniform float fresnelPower;
-      uniform float fresnelSkyBlend;
-      uniform float specPower;
-      uniform float specIntensity;
-      uniform float sparkleScale;
-      uniform float sparkleSpeed;
-      uniform float sparklePower;
-      uniform float sparkleIntensity;
-
-      varying vec2 vUv;
-      varying vec3 vWorldPosition;
-      varying vec3 vNormal;
-
-      float hash(vec2 p) {
-        return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
-      }
-
-      float noise(vec2 p) {
-        vec2 i = floor(p);
-        vec2 f = fract(p);
-        f = f * f * (3.0 - 2.0 * f);
-        float a = hash(i);
-        float b = hash(i + vec2(1.0, 0.0));
-        float c = hash(i + vec2(0.0, 1.0));
-        float d = hash(i + vec2(1.0, 1.0));
-        return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
-      }
-
-      void main() {
-        vec3 viewDir = normalize(camPos - vWorldPosition);
-        float fresnel = pow(1.0 - max(dot(viewDir, vec3(0.0, 1.0, 0.0)), 0.0), fresnelPower);
-
-        // Simple water color with depth variation from noise
-        vec3 baseColor = waterColor * 0.85;
-        float colorNoise = noise(vWorldPosition.xz * 0.02 + time * 0.3);
-        baseColor += vec3(-0.02, 0.02, 0.03) * colorNoise;
-
-        vec3 lightDir = normalize(vec3(0.5, 1.0, 0.3));
-        vec3 halfDir = normalize(lightDir + viewDir);
-        float spec = pow(max(dot(vNormal, halfDir), 0.0), specPower);
-        baseColor += vec3(1.0, 0.98, 0.94) * spec * specIntensity;
-
-        float sparkleNoise = noise(vWorldPosition.xz * sparkleScale + time * sparkleSpeed);
-        float sparkle = pow(sparkleNoise, sparklePower) * sparkleIntensity;
-        baseColor += vec3(1.0) * sparkle;
-
-        vec3 skyColor = vec3(0.55, 0.75, 0.88);
-        baseColor = mix(baseColor, skyColor, fresnel * fresnelSkyBlend);
-
-        gl_FragColor = vec4(baseColor, opacity);
-      }
-    `,
-    transparent: true,
-    side: THREE.DoubleSide,
+  // Create Water object with ocean shader from config
+  const water = new Water(waterGeometry, {
+    textureWidth: config.ocean.textureWidth,
+    textureHeight: config.ocean.textureHeight,
+    waterNormals: waterNormals,
+    sunDirection: new THREE.Vector3(),
+    sunColor: config.ocean.sunColor,
+    waterColor: config.ocean.waterColor,
+    distortionScale: config.ocean.distortionScale,
+    fog: scene.fog !== undefined,
   });
 
-  const water = new THREE.Mesh(waterGeometry, waterMaterial);
+  water.rotation.x = -Math.PI / 2;
+  water.position.y = waterHeight;
+
+  // Update sun direction to match sky from config
+  const phi = THREE.MathUtils.degToRad(90 - config.sky.sunElevation);
+  const theta = THREE.MathUtils.degToRad(config.sky.sunAzimuth);
+  water.material.uniforms['sunDirection'].value
+    .setFromSphericalCoords(1, phi, theta)
+    .normalize();
+
   scene.add(water);
-  return { water, material: waterMaterial };
+  return { water, material: water.material };
 }
 
 const waterObj = createWater();
@@ -844,7 +873,8 @@ gltfLoader.load(config.assets.models.boulder, (gltf) => {
   });
 
   const rc = config.rocks.boulders;
-  const waterLevel = config.waterPlane?.height || 8;
+  const waterLevel =
+    window.suggestedWaterLevel || config.waterPlane?.height || 45;
   for (let i = 0; i < rc.count; i++) {
     // Place boulders randomly across the terrain, above water level
     let x, z, height;
@@ -856,12 +886,15 @@ gltfLoader.load(config.assets.models.boulder, (gltf) => {
       attempts++;
     } while (height < waterLevel + 5 && attempts < 20);
 
-    const boulder = boulderModel.clone();
-    const scale = rc.scale.min + Math.random() * (rc.scale.max - rc.scale.min);
-    boulder.scale.setScalar(scale);
-    boulder.position.set(x, height - 1, z);
-    boulder.rotation.y = Math.random() * Math.PI * 2;
-    scene.add(boulder);
+    if (height >= waterLevel + 5) {
+      const boulder = boulderModel.clone();
+      const scale =
+        rc.scale.min + Math.random() * (rc.scale.max - rc.scale.min);
+      boulder.scale.setScalar(scale);
+      boulder.position.set(x, height - 1, z);
+      boulder.rotation.y = Math.random() * Math.PI * 2;
+      scene.add(boulder);
+    }
   }
 });
 
@@ -1169,10 +1202,12 @@ function createInstancedGrass() {
       const tuftX = (Math.random() - 0.5) * worldSize * gc.spreadFactor;
       const tuftZ = (Math.random() - 0.5) * worldSize * gc.spreadFactor;
 
-      // Skip if too close to river
-      if (getRiverDistance(tuftX, tuftZ) < gc.minRiverDistance) continue;
-
       const tuftY = getHeightAt(tuftX, tuftZ);
+
+      // Skip if below water level
+      const waterLevel =
+        window.suggestedWaterLevel || config.waterPlane?.height || 45;
+      if (tuftY < waterLevel + 3) continue;
       const tuftScale =
         gc.scale.min + Math.random() * (gc.scale.max - gc.scale.min);
 
@@ -1213,11 +1248,12 @@ function createInstancedGrass() {
 }
 
 // Placement helper
-function canPlace(x, z, minHeight = 10) {
+function canPlace(x, z, minAboveWater = 5) {
   // Check if position is above water level
-  const waterLevel = config.waterPlane?.height || 8;
+  const waterLevel =
+    window.suggestedWaterLevel || config.waterPlane?.height || 45;
   const height = getHeightAt(x, z);
-  return height > waterLevel + minHeight;
+  return height > waterLevel + minAboveWater;
 }
 
 // INSTANCED VEGETATION SYSTEM - Much better performance
@@ -1439,35 +1475,7 @@ function createInstancedGroundCover() {
   scene.add(coverInstanced);
 }
 
-// Create all instanced vegetation
-createInstancedDeciduousTrees();
-createInstancedCypressTrees();
-createInstancedBushes();
-createInstancedGroundCover();
-
-// Create instanced grass (single call, handles all placement internally)
-const grassMeshes = createInstancedGrass();
-
-// Place procedural rocks
-const prc = config.rocks.procedural;
-const waterLevelRocks = config.waterPlane?.height || 8;
-for (let i = 0; i < prc.count; i++) {
-  // Place rocks randomly, above water level
-  let x, z, height;
-  let attempts = 0;
-  do {
-    x = (Math.random() - 0.5) * worldSize * 0.9;
-    z = (Math.random() - 0.5) * worldSize * 0.9;
-    height = getHeightAt(x, z);
-    attempts++;
-  } while (height < waterLevelRocks + 3 && attempts < 20);
-
-  const rock = createRock(
-    prc.scale.min + Math.random() * (prc.scale.max - prc.scale.min),
-  );
-  rock.position.set(x, height, z);
-  scene.add(rock);
-}
+// Vegetation is now created in createAllVegetation() after heightmap loads
 
 // Post-processing setup
 const composer = new EffectComposer(renderer);
@@ -1546,8 +1554,11 @@ let time = 0;
 function animate() {
   requestAnimationFrame(animate);
   time += 0.016;
-  waterObj.material.uniforms.time.value = time;
-  waterObj.material.uniforms.camPos.value.copy(camera.position);
+  // Update water animation (use dynamic water if available)
+  const waterMat = window.currentWaterMaterial || waterObj.material;
+  if (waterMat && waterMat.uniforms && waterMat.uniforms.time) {
+    waterMat.uniforms.time.value = time;
+  }
   controls.update();
   composer.render();
 }

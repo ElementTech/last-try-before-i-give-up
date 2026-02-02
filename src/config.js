@@ -33,7 +33,7 @@ export const config = {
   // ===================
   heightmap: {
     enabled: true, // Set to false to use procedural generation
-    heightScale: 200, // Maximum height from heightmap
+    heightScale: 500, // Maximum height from heightmap
     heightOffset: 0, // Base height offset
   },
 
@@ -41,8 +41,8 @@ export const config = {
   // SPLATMAP SETTINGS
   // ===================
   splatmap: {
-    enabled: true, // Use splatmap for terrain coloring
-    blendWithProcedural: 0.2, // 0 = pure splatmap, 1 = pure procedural
+    enabled: false, // Disabled - use procedural grass/dirt coloring instead
+    blendWithProcedural: 0.2,
   },
 
   // ===================
@@ -50,7 +50,18 @@ export const config = {
   // ===================
   waterPlane: {
     enabled: true,
-    height: 8, // Water level height (areas below this will be water)
+    height: 45, // Water level - should match river valley depths in heightmap
+  },
+
+  // ===================
+  // OCEAN SHADER
+  // ===================
+  ocean: {
+    textureWidth: 512, // Reflection texture resolution
+    textureHeight: 512,
+    waterColor: 0x001e0f, // Deep teal color
+    distortionScale: 3.7, // Wave amplitude (higher = more turbulent)
+    sunColor: 0xffffff,
   },
 
   // ===================
@@ -77,8 +88,14 @@ export const config = {
   // SKY & FOG
   // ===================
   sky: {
-    // Softer, warmer sky like reference
-    color: 0x8ec8e8,
+    // Atmospheric sky shader parameters
+    turbidity: 10, // Atmospheric density (0-20)
+    rayleigh: 2, // Scattering coefficient (0-4)
+    mieCoefficient: 0.005, // Particle scattering intensity (0-0.1)
+    mieDirectionalG: 0.8, // Forward scattering directionality (0-1)
+    sunElevation: 25, // Sun angle above horizon in degrees (0-90)
+    sunAzimuth: 180, // Sun rotation angle (-180 to 180)
+    // Fog
     fogColor: 0xa8c8d8,
     fogDensity: 0.0008,
   },
@@ -143,31 +160,6 @@ export const config = {
       width: 55,
       widthSegments: 80,
       lengthSegments: 800,
-    },
-  },
-
-  // ===================
-  // WATER SHADER
-  // ===================
-  water: {
-    color: 0x4a8a9a,
-    opacity: 0.75,
-    waveSpeed: { x: 1.2, z: 0.9, combined: 1.5 },
-    waveAmplitude: { x: 0.2, z: 0.15, combined: 0.1 },
-    waveFrequency: { x: 0.08, z: 0.06, combined: { x: 0.12, z: 0.08 } },
-    fresnel: {
-      power: 2.5,
-      skyBlend: 0.4,
-    },
-    specular: {
-      power: 60,
-      intensity: 0.4,
-    },
-    sparkle: {
-      scale: 0.5,
-      speed: 2.0,
-      power: 6.0,
-      intensity: 0.2,
     },
   },
 
