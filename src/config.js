@@ -224,7 +224,7 @@ export const config = {
   // TREES - DECIDUOUS
   // ===================
   deciduousTrees: {
-    count: 500,
+    count: 300,
     spreadFactor: 0.88,
     minRiverDistance: 30,
     scale: { min: 0.5, max: 1.1 },
@@ -254,7 +254,7 @@ export const config = {
   // TREES - CYPRESS
   // ===================
   cypressTrees: {
-    count: 250,
+    count: 150,
     spreadFactor: 0.88,
     minRiverDistance: 30,
     scale: { min: 0.55, max: 1.0 },
@@ -282,7 +282,7 @@ export const config = {
   // BUSHES
   // ===================
   bushes: {
-    count: 1200,
+    count: 600,
     spreadFactor: 0.92,
     minRiverDistance: 10,
     scale: { min: 0.4, max: 1.0 },
@@ -297,7 +297,7 @@ export const config = {
   // GROUND COVER
   // ===================
   groundCover: {
-    count: 1800,
+    count: 800,
     spreadFactor: 0.92,
     minRiverDistance: 12,
     colors: [0x3a8a3a, 0x4a9a4a, 0x2f7f2f, 0x459045],
@@ -311,7 +311,7 @@ export const config = {
   // GRASS TUFTS
   // ===================
   grass: {
-    count: 10000,
+    count: 5000,
     spreadFactor: 0.95,
     minRiverDistance: 8,
     // More vibrant greens
@@ -342,9 +342,9 @@ export const config = {
   rocks: {
     // Procedural rocks along river
     procedural: {
-      count: 100,
+      count: 40,
       spreadFromRiver: 50,
-      scale: { min: 0.2, max: 0.6 },
+      scale: { min: 0.3, max: 0.8 },
       size: { min: 2, max: 4.5 },
       colors: [0x5a5a65, 0x4a4a55, 0x656575, 0x555560],
       roughness: 0.85,
@@ -352,9 +352,9 @@ export const config = {
     },
     // Boulder models
     boulders: {
-      count: 80,
+      count: 30,
       spreadFromRiver: 55,
-      scale: { min: 2, max: 8 },
+      scale: { min: 3, max: 10 },
     },
   },
 

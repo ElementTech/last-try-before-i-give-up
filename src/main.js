@@ -1157,61 +1157,230 @@ function canPlace(x, z, minRiverDist = 20) {
   return getRiverDistance(x, z) > minRiverDist;
 }
 
-// Place deciduous trees
-const dtc = config.deciduousTrees;
-for (let i = 0; i < dtc.count; i++) {
-  const x = (Math.random() - 0.5) * worldSize * dtc.spreadFactor;
-  const z = (Math.random() - 0.5) * worldSize * dtc.spreadFactor;
-  if (!canPlace(x, z, dtc.minRiverDistance)) continue;
-
-  const tree = createDeciduousTree();
-  const scale = dtc.scale.min + Math.random() * (dtc.scale.max - dtc.scale.min);
-  tree.scale.setScalar(scale);
-  tree.position.set(x, getHeightAt(x, z), z);
-  tree.rotation.y = Math.random() * Math.PI * 2;
-  scene.add(tree);
+// INSTANCED VEGETATION SYSTEM - Much better performance
+// Pre-generate valid positions for all vegetation
+function generatePositions(count, spreadFactor, minRiverDist) {
+  const positions = [];
+  let attempts = 0;
+  while (positions.length < count && attempts < count * 3) {
+    const x = (Math.random() - 0.5) * worldSize * spreadFactor;
+    const z = (Math.random() - 0.5) * worldSize * spreadFactor;
+    if (canPlace(x, z, minRiverDist)) {
+      positions.push({ x, z, y: getHeightAt(x, z) });
+    }
+    attempts++;
+  }
+  return positions;
 }
 
-// Place cypress trees
-const ctc = config.cypressTrees;
-for (let i = 0; i < ctc.count; i++) {
-  const x = (Math.random() - 0.5) * worldSize * ctc.spreadFactor;
-  const z = (Math.random() - 0.5) * worldSize * ctc.spreadFactor;
-  if (!canPlace(x, z, ctc.minRiverDistance)) continue;
-
-  const tree = createCypressTree();
-  const scale = ctc.scale.min + Math.random() * (ctc.scale.max - ctc.scale.min);
-  tree.scale.setScalar(scale);
-  tree.position.set(x, getHeightAt(x, z), z);
-  tree.rotation.y = Math.random() * Math.PI * 2;
-  scene.add(tree);
-}
-
-// Place bushes
-const bc = config.bushes;
-for (let i = 0; i < bc.count; i++) {
-  const x = (Math.random() - 0.5) * worldSize * bc.spreadFactor;
-  const z = (Math.random() - 0.5) * worldSize * bc.spreadFactor;
-  if (!canPlace(x, z, bc.minRiverDistance)) continue;
-
-  const bush = createBush(
-    bc.scale.min + Math.random() * (bc.scale.max - bc.scale.min),
+// Create instanced deciduous trees (single geometry, many instances)
+function createInstancedDeciduousTrees() {
+  const dtc = config.deciduousTrees;
+  const positions = generatePositions(
+    dtc.count,
+    dtc.spreadFactor,
+    dtc.minRiverDistance,
   );
-  bush.position.set(x, getHeightAt(x, z), z);
-  scene.add(bush);
+  const dummy = new THREE.Object3D();
+
+  // Trunk instances
+  const trunkInstanced = new THREE.InstancedMesh(
+    trunkGeometry,
+    trunkMaterial,
+    positions.length,
+  );
+  trunkInstanced.castShadow = true;
+  trunkInstanced.receiveShadow = true;
+
+  // Foliage instances - one InstancedMesh per foliage layer
+  const foliageInstances = foliageGeoms.map((geom, i) => {
+    const mesh = new THREE.InstancedMesh(
+      geom,
+      foliageMaterials[i % foliageMaterials.length],
+      positions.length,
+    );
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    return mesh;
+  });
+
+  positions.forEach((pos, i) => {
+    const scale =
+      dtc.scale.min + Math.random() * (dtc.scale.max - dtc.scale.min);
+    const rotY = Math.random() * Math.PI * 2;
+
+    // Trunk
+    dummy.position.set(pos.x, pos.y + 5 * scale, pos.z);
+    dummy.rotation.set(0, rotY, 0);
+    dummy.scale.setScalar(scale);
+    dummy.updateMatrix();
+    trunkInstanced.setMatrixAt(i, dummy.matrix);
+
+    // Foliage layers
+    foliageInstances.forEach((mesh, j) => {
+      dummy.position.set(
+        pos.x + (Math.random() - 0.5) * 3 * scale,
+        pos.y + (dtc.foliage.baseY + j * 1.5) * scale,
+        pos.z + (Math.random() - 0.5) * 3 * scale,
+      );
+      dummy.rotation.set(0, rotY + Math.random(), 0);
+      dummy.scale.setScalar(scale);
+      dummy.updateMatrix();
+      mesh.setMatrixAt(i, dummy.matrix);
+    });
+  });
+
+  trunkInstanced.instanceMatrix.needsUpdate = true;
+  scene.add(trunkInstanced);
+
+  foliageInstances.forEach((mesh) => {
+    mesh.instanceMatrix.needsUpdate = true;
+    scene.add(mesh);
+  });
 }
 
-// Place ground cover
-const gcc = config.groundCover;
-for (let i = 0; i < gcc.count; i++) {
-  const x = (Math.random() - 0.5) * worldSize * gcc.spreadFactor;
-  const z = (Math.random() - 0.5) * worldSize * gcc.spreadFactor;
-  if (!canPlace(x, z, gcc.minRiverDistance)) continue;
+// Create instanced cypress trees
+function createInstancedCypressTrees() {
+  const ctc = config.cypressTrees;
+  const positions = generatePositions(
+    ctc.count,
+    ctc.spreadFactor,
+    ctc.minRiverDistance,
+  );
+  const dummy = new THREE.Object3D();
 
-  const cover = createGroundCover();
-  cover.position.set(x, getHeightAt(x, z), z);
-  scene.add(cover);
+  const trunkInstanced = new THREE.InstancedMesh(
+    cypressTrunkGeometry,
+    cypressTrunkMaterial,
+    positions.length,
+  );
+  trunkInstanced.castShadow = true;
+  trunkInstanced.receiveShadow = true;
+
+  const coneInstances = coneGeoms.map((geom, i) => {
+    const mesh = new THREE.InstancedMesh(
+      geom,
+      cypressMaterials[i % cypressMaterials.length],
+      positions.length,
+    );
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    return mesh;
+  });
+
+  positions.forEach((pos, i) => {
+    const scale =
+      ctc.scale.min + Math.random() * (ctc.scale.max - ctc.scale.min);
+    const rotY = Math.random() * Math.PI * 2;
+
+    dummy.position.set(pos.x, pos.y + 4 * scale, pos.z);
+    dummy.rotation.set(0, rotY, 0);
+    dummy.scale.setScalar(scale);
+    dummy.updateMatrix();
+    trunkInstanced.setMatrixAt(i, dummy.matrix);
+
+    coneInstances.forEach((mesh, j) => {
+      dummy.position.set(
+        pos.x,
+        pos.y + (ctc.foliage.baseY + j * 5) * scale,
+        pos.z,
+      );
+      dummy.rotation.set(0, rotY, 0);
+      dummy.scale.setScalar(scale);
+      dummy.updateMatrix();
+      mesh.setMatrixAt(i, dummy.matrix);
+    });
+  });
+
+  trunkInstanced.instanceMatrix.needsUpdate = true;
+  scene.add(trunkInstanced);
+
+  coneInstances.forEach((mesh) => {
+    mesh.instanceMatrix.needsUpdate = true;
+    scene.add(mesh);
+  });
 }
+
+// Create instanced bushes
+function createInstancedBushes() {
+  const bc = config.bushes;
+  const positions = generatePositions(
+    bc.count,
+    bc.spreadFactor,
+    bc.minRiverDistance,
+  );
+  const dummy = new THREE.Object3D();
+
+  // Use a shared sphere geometry for all bush blobs
+  const bushGeom = new THREE.IcosahedronGeometry(2, 1);
+
+  // Create one instanced mesh per color
+  const bushInstances = bushMaterials.map((mat) => {
+    const mesh = new THREE.InstancedMesh(bushGeom, mat, positions.length);
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    return mesh;
+  });
+
+  positions.forEach((pos, i) => {
+    const scale = bc.scale.min + Math.random() * (bc.scale.max - bc.scale.min);
+
+    bushInstances.forEach((mesh, j) => {
+      const offsetX = (Math.random() - 0.5) * bc.spread * scale * 0.5;
+      const offsetZ = (Math.random() - 0.5) * bc.spread * scale * 0.5;
+      dummy.position.set(pos.x + offsetX, pos.y + scale * 0.8, pos.z + offsetZ);
+      dummy.rotation.set(0, Math.random() * Math.PI, 0);
+      dummy.scale.setScalar(scale * (0.8 + Math.random() * 0.4));
+      dummy.updateMatrix();
+      mesh.setMatrixAt(i, dummy.matrix);
+    });
+  });
+
+  bushInstances.forEach((mesh) => {
+    mesh.instanceMatrix.needsUpdate = true;
+    scene.add(mesh);
+  });
+}
+
+// Create instanced ground cover (simple spheres)
+function createInstancedGroundCover() {
+  const gcc = config.groundCover;
+  const positions = generatePositions(
+    gcc.count,
+    gcc.spreadFactor,
+    gcc.minRiverDistance,
+  );
+  const dummy = new THREE.Object3D();
+
+  const coverGeom = new THREE.SphereGeometry(0.6, 5, 4);
+  const coverMat = new THREE.MeshStandardMaterial({
+    color: gcc.colors[0],
+    roughness: 0.9,
+  });
+
+  const coverInstanced = new THREE.InstancedMesh(
+    coverGeom,
+    coverMat,
+    positions.length,
+  );
+  coverInstanced.castShadow = true;
+
+  positions.forEach((pos, i) => {
+    dummy.position.set(pos.x, pos.y + 0.25, pos.z);
+    dummy.scale.set(1, gcc.flatness, 1);
+    dummy.updateMatrix();
+    coverInstanced.setMatrixAt(i, dummy.matrix);
+  });
+
+  coverInstanced.instanceMatrix.needsUpdate = true;
+  scene.add(coverInstanced);
+}
+
+// Create all instanced vegetation
+createInstancedDeciduousTrees();
+createInstancedCypressTrees();
+createInstancedBushes();
+createInstancedGroundCover();
 
 // Create instanced grass (single call, handles all placement internally)
 const grassMeshes = createInstancedGrass();
