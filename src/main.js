@@ -144,14 +144,21 @@ const foliage2OpacityTexture = textureLoader.load(
 foliage2OpacityTexture.wrapS = foliage2OpacityTexture.wrapT =
   THREE.RepeatWrapping;
 
+// Load splatmap texture if enabled
+let splatmapTexture = null;
+if (config.splatmap?.enabled && config.assets.textures.splatmap) {
+  splatmapTexture = textureLoader.load(config.assets.textures.splatmap);
+  splatmapTexture.wrapS = splatmapTexture.wrapT = THREE.ClampToEdgeWrapping;
+}
+
 // Terrain parameters from config
 const worldWidth = config.world.resolution;
 const worldDepth = config.world.resolution;
 const worldSize = config.world.size;
 const perlin = new ImprovedNoise();
 
-// Generate terrain height data
-function generateHeight(width, depth) {
+// Generate procedural terrain height data (fallback)
+function generateProceduralHeight(width, depth) {
   const size = width * depth;
   const data = new Float32Array(size);
   const t = config.terrain;
@@ -193,7 +200,80 @@ function generateHeight(width, depth) {
   return data;
 }
 
-const heightData = generateHeight(worldWidth, worldDepth);
+// Generate height data from heightmap image
+function generateHeightFromImage(
+  imageData,
+  imgWidth,
+  imgHeight,
+  targetWidth,
+  targetDepth,
+) {
+  const size = targetWidth * targetDepth;
+  const data = new Float32Array(size);
+  const hm = config.heightmap;
+
+  for (let i = 0; i < size; i++) {
+    const x = i % targetWidth;
+    const z = Math.floor(i / targetWidth);
+
+    // Map terrain grid to image coordinates
+    const imgX = Math.floor((x / targetWidth) * imgWidth);
+    const imgZ = Math.floor((z / targetDepth) * imgHeight);
+    const imgIndex = (imgZ * imgWidth + imgX) * 4; // RGBA
+
+    // Get grayscale value (0-255) and normalize to 0-1
+    const heightValue = imageData[imgIndex] / 255;
+
+    // Scale height
+    data[i] = heightValue * hm.heightScale + hm.heightOffset;
+  }
+
+  return data;
+}
+
+// Load heightmap and generate terrain
+let heightData;
+
+function loadHeightmap() {
+  return new Promise((resolve) => {
+    if (!config.heightmap.enabled) {
+      heightData = generateProceduralHeight(worldWidth, worldDepth);
+      resolve();
+      return;
+    }
+
+    const img = new Image();
+    img.crossOrigin = "anonymous";
+    img.onload = () => {
+      // Draw image to canvas to get pixel data
+      const canvas = document.createElement("canvas");
+      canvas.width = img.width;
+      canvas.height = img.height;
+      const ctx = canvas.getContext("2d");
+      ctx.drawImage(img, 0, 0);
+      const imageData = ctx.getImageData(0, 0, img.width, img.height).data;
+
+      heightData = generateHeightFromImage(
+        imageData,
+        img.width,
+        img.height,
+        worldWidth,
+        worldDepth,
+      );
+      console.log("Heightmap loaded:", img.width, "x", img.height);
+      resolve();
+    };
+    img.onerror = () => {
+      console.warn("Failed to load heightmap, using procedural generation");
+      heightData = generateProceduralHeight(worldWidth, worldDepth);
+      resolve();
+    };
+    img.src = config.assets.textures.heightmap;
+  });
+}
+
+// Initialize with procedural data first (will be replaced when heightmap loads)
+heightData = generateProceduralHeight(worldWidth, worldDepth);
 
 function getHeightAt(x, z) {
   const gridX = Math.floor((x / worldSize + 0.5) * worldWidth);
@@ -244,11 +324,24 @@ const terrainGeometry = new THREE.PlaneGeometry(
 );
 terrainGeometry.rotateX(-Math.PI / 2);
 
-const vertices = terrainGeometry.attributes.position.array;
-for (let i = 0, j = 0, l = vertices.length / 3; i < l; i++, j += 3) {
-  vertices[j + 1] = heightData[i];
+// Function to update terrain vertices from heightData
+function updateTerrainGeometry() {
+  const vertices = terrainGeometry.attributes.position.array;
+  for (let i = 0, j = 0, l = vertices.length / 3; i < l; i++, j += 3) {
+    vertices[j + 1] = heightData[i];
+  }
+  terrainGeometry.attributes.position.needsUpdate = true;
+  terrainGeometry.computeVertexNormals();
 }
-terrainGeometry.computeVertexNormals();
+
+// Initial terrain setup
+updateTerrainGeometry();
+
+// Load heightmap and rebuild terrain when ready
+loadHeightmap().then(() => {
+  updateTerrainGeometry();
+  console.log("Terrain updated with heightmap data");
+});
 
 // Build terrain shader from config
 const tc = config.terrainColors;
@@ -268,6 +361,10 @@ const terrainMaterial = new THREE.ShaderMaterial({
       foliageOpacityTex: { value: foliageOpacityTexture },
       foliage2ColorTex: { value: foliage2ColorTexture },
       foliage2OpacityTex: { value: foliage2OpacityTexture },
+      // Splatmap
+      splatmapTex: { value: splatmapTexture },
+      useSplatmap: { value: config.splatmap?.enabled ? 1.0 : 0.0 },
+      splatmapBlend: { value: config.splatmap?.blendWithProcedural || 0.0 },
       textureScale: { value: ts.textureScale },
       textureScale2: { value: ts.textureScale2 },
       textureScale3: { value: ts.textureScale3 },
@@ -311,6 +408,10 @@ const terrainMaterial = new THREE.ShaderMaterial({
           tc.riverGrass.b,
         ),
       },
+      // Height-based terrain colors
+      sandColor: { value: new THREE.Vector3(tc.sand.r, tc.sand.g, tc.sand.b) },
+      rockColor: { value: new THREE.Vector3(tc.rock.r, tc.rock.g, tc.rock.b) },
+      snowColor: { value: new THREE.Vector3(tc.snow.r, tc.snow.g, tc.snow.b) },
       warmTint: {
         value: new THREE.Vector3(tc.warmTint.r, tc.warmTint.g, tc.warmTint.b),
       },
@@ -357,6 +458,15 @@ const terrainMaterial = new THREE.ShaderMaterial({
       aoRangeMax: { value: ts.lighting.aoRange.max },
       aoStrength: { value: ts.lighting.aoStrength },
       contrast: { value: ts.contrast },
+      // Height-based blending uniforms
+      beachMax: { value: ts.heightBlend.beachMax },
+      beachBlend: { value: ts.heightBlend.beachBlend },
+      grassMin: { value: ts.heightBlend.grassMin },
+      grassMax: { value: ts.heightBlend.grassMax },
+      rockSlopeThreshold: { value: ts.heightBlend.rockSlopeThreshold },
+      rockHeightMin: { value: ts.heightBlend.rockHeightMin },
+      snowMin: { value: ts.heightBlend.snowMin },
+      snowBlend: { value: ts.heightBlend.snowBlend },
     },
   ]),
   vertexShader: `
@@ -398,6 +508,9 @@ const terrainMaterial = new THREE.ShaderMaterial({
     uniform sampler2D foliageOpacityTex;
     uniform sampler2D foliage2ColorTex;
     uniform sampler2D foliage2OpacityTex;
+    uniform sampler2D splatmapTex;
+    uniform float useSplatmap;
+    uniform float splatmapBlend;
     uniform float textureScale;
     uniform float textureScale2;
     uniform float textureScale3;
@@ -468,6 +581,19 @@ const terrainMaterial = new THREE.ShaderMaterial({
     uniform float aoStrength;
     uniform float contrast;
 
+    // Height-based blending
+    uniform vec3 sandColor;
+    uniform vec3 rockColor;
+    uniform vec3 snowColor;
+    uniform float beachMax;
+    uniform float beachBlend;
+    uniform float grassMin;
+    uniform float grassMax;
+    uniform float rockSlopeThreshold;
+    uniform float rockHeightMin;
+    uniform float snowMin;
+    uniform float snowBlend;
+
     varying vec2 vUv;
     varying vec3 vNormal;
     varying vec3 vWorldPosition;
@@ -517,84 +643,34 @@ const terrainMaterial = new THREE.ShaderMaterial({
 
     void main() {
       vec2 worldUV = vWorldPosition.xz * textureScale;
-      vec2 worldUV2 = vWorldPosition.xz * textureScale2;
-      vec2 worldUV3 = vWorldPosition.xz * textureScale3;
-
-      // Multi-scale dirt sampling with texture variations
-      vec3 dirtBase1 = sampleMultiScale(dirtTexture, vWorldPosition.xz, textureScale, textureScale2, textureScale3, multiScaleBlend);
-      vec3 dirtBase2 = texture2D(dirt2Texture, worldUV * 0.9).rgb;
-      vec3 dirtBase3 = texture2D(dirt3Texture, worldUV * 1.1).rgb;
-
-      // Blend dirt textures using noise for variation
-      float dirtBlendNoise = noise(vWorldPosition.xz * 0.015);
-      float dirtBlendNoise2 = noise(vWorldPosition.xz * 0.008 + 50.0);
-      vec3 dirtBase = dirtBase1;
-      dirtBase = mix(dirtBase, dirtBase2, smoothstep(0.4, 0.6, dirtBlendNoise) * 0.5);
-      dirtBase = mix(dirtBase, dirtBase3, smoothstep(0.45, 0.65, dirtBlendNoise2) * 0.4);
-
-      // Multi-scale grass sampling
-      vec3 grassBase = sampleMultiScale(grassTexture, vWorldPosition.xz * 0.8, textureScale, textureScale2, textureScale3, multiScaleBlend);
-      vec3 forestBase = sampleMultiScale(forestTexture, vWorldPosition.xz * 0.6, textureScale, textureScale2, textureScale3, multiScaleBlend);
-
-      // Alpha-based foliage overlay (sparse grass patches)
-      vec2 foliageUV = vWorldPosition.xz * foliageScale;
-      vec3 foliageCol1 = texture2D(foliageColorTex, foliageUV).rgb;
-      float foliageAlpha1 = texture2D(foliageOpacityTex, foliageUV).r;
-      vec3 foliageCol2 = texture2D(foliage2ColorTex, foliageUV * 1.3 + 0.5).rgb;
-      float foliageAlpha2 = texture2D(foliage2OpacityTex, foliageUV * 1.3 + 0.5).r;
-
-      vec3 dirt = dirtBase * dirtColor;
-      vec3 dirtPath = dirtBase * dirtPathColor;
-      vec3 grass = grassBase * grassColor;
-      vec3 darkGrass = grassBase * darkGrassColor;
-      vec3 forest = forestBase * forestColor;
-
-      float n1 = fbm(vWorldPosition.xz * fbmScale1);
-      float n2 = fbm(vWorldPosition.xz * fbmScale2 + 50.0);
-      float n3 = noise(vWorldPosition.xz * largeNoiseScale + 100.0);
       float fineDetail = noise(vWorldPosition.xz * detailNoiseScale);
+      float height = vHeight;
+      float slope = 1.0 - vNormal.y;
 
-      float pathVal = pathNoise(vWorldPosition.xz);
-      float pathMask = 1.0 - smoothstep(pathWidthMin, pathWidthMax, pathVal);
+      // Sample splatmap using UV coordinates (maps directly to terrain)
+      vec3 splatmapColor = texture2D(splatmapTex, vUv).rgb;
 
-      float riverDist = abs(vUv.x - 0.5) * 2.0;
-      float nearRiver = 1.0 - smoothstep(riverGrassMin, riverGrassMax, riverDist);
+      // If using splatmap, use it directly as the base color
+      vec3 baseColor;
+      if (useSplatmap > 0.5) {
+        // Use splatmap color directly, boost saturation slightly
+        baseColor = splatmapColor;
+        // Add subtle texture detail from dirt texture for surface variation
+        vec3 detailTex = texture2D(dirtTexture, worldUV * 2.0).rgb;
+        baseColor *= 0.85 + detailTex * 0.3;
+      } else {
+        // Procedural coloring fallback
+        vec3 dirtBase = texture2D(dirtTexture, worldUV).rgb;
+        vec3 grassBase = texture2D(grassTexture, worldUV * 0.8).rgb;
 
-      float grassMask = smoothstep(grassThresh1Min, grassThresh1Max, n1);
-      grassMask *= smoothstep(grassThresh2Min, grassThresh2Max, n2);
-      grassMask = pow(grassMask, grassContrast);
+        vec3 dirt = dirtBase * dirtColor;
+        vec3 grass = grassBase * grassColor;
 
-      float forestMask = smoothstep(forestThreshMin, forestThreshMax, n3) * forestStrength;
+        float n1 = fbm(vWorldPosition.xz * fbmScale1);
+        float grassMask = smoothstep(grassThresh1Min, grassThresh1Max, n1);
 
-      // Start with dirt base
-      vec3 baseColor = dirt;
-
-      // Layer grass with standard blending
-      baseColor = mix(baseColor, grass, grassMask * grassStrength);
-      baseColor = mix(baseColor, darkGrass, forestMask * grassMask);
-      baseColor = mix(baseColor, forest, forestMask * (1.0 - grassMask) * 0.5);
-
-      // Apply alpha-based foliage overlays (shows dirt through sparse patches)
-      // This creates the natural clumpy grass appearance
-      float foliageMask = grassMask * foliageStrength * (1.0 - pathMask);
-      vec3 foliageTinted1 = foliageCol1 * foliageColor;
-      vec3 foliageTinted2 = foliageCol2 * foliageColor * vec3(0.9, 1.1, 0.85);
-
-      // Apply foliage with alpha - lets dirt show through gaps
-      float alpha1 = foliageAlpha1 * foliageMask * smoothstep(foliageThreshold - 0.1, foliageThreshold + 0.1, foliageAlpha1);
-      float alpha2 = foliageAlpha2 * foliageMask * smoothstep(foliageThreshold - 0.1, foliageThreshold + 0.1, foliageAlpha2) * 0.7;
-      baseColor = mix(baseColor, foliageTinted1, alpha1);
-      baseColor = mix(baseColor, foliageTinted2, alpha2);
-
-      // Paths on top
-      baseColor = mix(baseColor, dirtPath, pathMask * pathStrength);
-
-      vec3 riverGrass = grass * riverGrassColor;
-      baseColor = mix(baseColor, riverGrass, nearRiver * riverGrassStrength * (1.0 - pathMask));
-
-      vec3 mud = dirt * mudColor;
-      float mudMask = (1.0 - smoothstep(mudRangeMin, mudRangeMax, riverDist)) * mudStrength;
-      baseColor = mix(baseColor, mud, mudMask);
+        baseColor = mix(dirt, grass, grassMask * grassStrength);
+      }
 
       float NdotL = max(dot(vNormal, sunDirection), 0.0);
       float diffuse = NdotL * diffuseStrength;
@@ -620,40 +696,20 @@ scene.add(terrain);
 
 // Water
 function createWater() {
-  const r = config.river;
   const w = config.water;
+  const waterHeight = config.waterPlane?.height || 8;
 
+  // Create a simple flat water plane covering the entire terrain
   const waterGeometry = new THREE.PlaneGeometry(
-    r.geometry.width,
-    worldSize,
-    r.geometry.widthSegments,
-    r.geometry.lengthSegments,
+    worldSize * 1.2,
+    worldSize * 1.2,
+    64,
+    64,
   );
   waterGeometry.rotateX(-Math.PI / 2);
 
-  const waterVerts = waterGeometry.attributes.position.array;
-  const segX = r.geometry.widthSegments + 1;
-  const segZ = r.geometry.lengthSegments + 1;
-
-  for (let zi = 0; zi < segZ; zi++) {
-    const z = (zi / (segZ - 1) - 0.5) * worldSize;
-    const gridZ = (z / worldSize + 0.5) * worldDepth;
-    const riverCurve =
-      Math.sin(gridZ * r.curveFrequency1) * r.curveAmplitude1 +
-      Math.sin(gridZ * r.curveFrequency2) * r.curveAmplitude2;
-    const centerX =
-      ((worldWidth / 2 + riverCurve) / worldWidth - 0.5) * worldSize;
-
-    for (let xi = 0; xi < segX; xi++) {
-      const idx = (zi * segX + xi) * 3;
-      const localX = (xi / (segX - 1) - 0.5) * r.geometry.width;
-      waterVerts[idx] = centerX + localX;
-      waterVerts[idx + 1] = getHeightAt(centerX, z) + r.waterHeight;
-      waterVerts[idx + 2] = z;
-    }
-  }
-
-  waterGeometry.computeVertexNormals();
+  // Position the water plane at the configured height
+  waterGeometry.translate(0, waterHeight, 0);
 
   const waterMaterial = new THREE.ShaderMaterial({
     uniforms: {
@@ -745,11 +801,8 @@ function createWater() {
         vec3 viewDir = normalize(camPos - vWorldPosition);
         float fresnel = pow(1.0 - max(dot(viewDir, vec3(0.0, 1.0, 0.0)), 0.0), fresnelPower);
 
-        float widthGrad = smoothstep(0.0, 0.5, vUv.x) * smoothstep(1.0, 0.5, vUv.x);
-        vec3 deepWater = waterColor * 0.55;
-        vec3 shallowWater = waterColor * 1.15;
-        vec3 baseColor = mix(deepWater, shallowWater, widthGrad);
-
+        // Simple water color with depth variation from noise
+        vec3 baseColor = waterColor * 0.85;
         float colorNoise = noise(vWorldPosition.xz * 0.02 + time * 0.3);
         baseColor += vec3(-0.02, 0.02, 0.03) * colorNoise;
 
@@ -791,21 +844,22 @@ gltfLoader.load(config.assets.models.boulder, (gltf) => {
   });
 
   const rc = config.rocks.boulders;
+  const waterLevel = config.waterPlane?.height || 8;
   for (let i = 0; i < rc.count; i++) {
-    const z = (Math.random() - 0.5) * worldSize * 0.9;
-    const gridZ = (z / worldSize + 0.5) * worldDepth;
-    const r = config.river;
-    const riverCurve =
-      Math.sin(gridZ * r.curveFrequency1) * r.curveAmplitude1 +
-      Math.sin(gridZ * r.curveFrequency2) * r.curveAmplitude2;
-    const offset = (Math.random() - 0.5) * rc.spreadFromRiver;
-    const x =
-      ((worldWidth / 2 + riverCurve + offset) / worldWidth - 0.5) * worldSize;
+    // Place boulders randomly across the terrain, above water level
+    let x, z, height;
+    let attempts = 0;
+    do {
+      x = (Math.random() - 0.5) * worldSize * 0.9;
+      z = (Math.random() - 0.5) * worldSize * 0.9;
+      height = getHeightAt(x, z);
+      attempts++;
+    } while (height < waterLevel + 5 && attempts < 20);
 
     const boulder = boulderModel.clone();
     const scale = rc.scale.min + Math.random() * (rc.scale.max - rc.scale.min);
     boulder.scale.setScalar(scale);
-    boulder.position.set(x, getHeightAt(x, z) - 1, z);
+    boulder.position.set(x, height - 1, z);
     boulder.rotation.y = Math.random() * Math.PI * 2;
     scene.add(boulder);
   }
@@ -834,16 +888,22 @@ const cypressTrunkMaterial = new THREE.MeshStandardMaterial({
 const trunkGeometry = new THREE.CylinderGeometry(0.5, 0.7, 10, 6);
 const cypressTrunkGeometry = new THREE.CylinderGeometry(0.35, 0.55, 8, 6);
 
-// Create deformed sphere geometry once
+// Create deformed sphere geometry once - more fluffy with higher detail
 function createDeformedSphere(radius, detail, seed) {
-  const geometry = new THREE.IcosahedronGeometry(radius, detail);
+  // Use higher detail for fluffier look
+  const geometry = new THREE.IcosahedronGeometry(radius, detail + 1);
   const pos = geometry.attributes.position;
   for (let i = 0; i < pos.count; i++) {
     const x = pos.getX(i);
     const y = pos.getY(i);
     const z = pos.getZ(i);
-    const n = perlin.noise(x * 0.3 + seed, y * 0.3, z * 0.3) * 0.3 + 1;
-    pos.setXYZ(i, x * n, y * n * (y > 0 ? 1 : 0.7), z * n);
+    // More organic deformation with multiple noise octaves
+    const n1 = perlin.noise(x * 0.3 + seed, y * 0.3, z * 0.3) * 0.25;
+    const n2 = perlin.noise(x * 0.6 + seed, y * 0.6, z * 0.6) * 0.15;
+    const n = 1 + n1 + n2;
+    // Flatten bottom more for tree-like shape
+    const yScale = y > 0 ? 1.1 : 0.6;
+    pos.setXYZ(i, x * n, y * n * yScale, z * n);
   }
   geometry.computeVertexNormals();
   return geometry;
@@ -1153,8 +1213,11 @@ function createInstancedGrass() {
 }
 
 // Placement helper
-function canPlace(x, z, minRiverDist = 20) {
-  return getRiverDistance(x, z) > minRiverDist;
+function canPlace(x, z, minHeight = 10) {
+  // Check if position is above water level
+  const waterLevel = config.waterPlane?.height || 8;
+  const height = getHeightAt(x, z);
+  return height > waterLevel + minHeight;
 }
 
 // INSTANCED VEGETATION SYSTEM - Much better performance
@@ -1387,21 +1450,22 @@ const grassMeshes = createInstancedGrass();
 
 // Place procedural rocks
 const prc = config.rocks.procedural;
+const waterLevelRocks = config.waterPlane?.height || 8;
 for (let i = 0; i < prc.count; i++) {
-  const z = (Math.random() - 0.5) * worldSize * 0.9;
-  const gridZ = (z / worldSize + 0.5) * worldDepth;
-  const r = config.river;
-  const riverCurve =
-    Math.sin(gridZ * r.curveFrequency1) * r.curveAmplitude1 +
-    Math.sin(gridZ * r.curveFrequency2) * r.curveAmplitude2;
-  const offset = (Math.random() - 0.5) * prc.spreadFromRiver;
-  const x =
-    ((worldWidth / 2 + riverCurve + offset) / worldWidth - 0.5) * worldSize;
+  // Place rocks randomly, above water level
+  let x, z, height;
+  let attempts = 0;
+  do {
+    x = (Math.random() - 0.5) * worldSize * 0.9;
+    z = (Math.random() - 0.5) * worldSize * 0.9;
+    height = getHeightAt(x, z);
+    attempts++;
+  } while (height < waterLevelRocks + 3 && attempts < 20);
 
   const rock = createRock(
     prc.scale.min + Math.random() * (prc.scale.max - prc.scale.min),
   );
-  rock.position.set(x, getHeightAt(x, z), z);
+  rock.position.set(x, height, z);
   scene.add(rock);
 }
 

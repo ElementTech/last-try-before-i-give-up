@@ -18,10 +18,39 @@ export const config = {
       foliageOpacity: "/textures/Foliage001_1K-PNG_Opacity.png",
       foliage2Color: "/textures/Foliage003_Color.png",
       foliage2Opacity: "/textures/Foliage003_Opacity.png",
+      // Heightmap for terrain (grayscale PNG)
+      heightmap: "/textures/heightmap_rugged.png",
+      // Splatmap/diffuse for terrain coloring
+      splatmap: "/textures/splatmap_rugged.png",
     },
     models: {
       boulder: "/models/boulder_01/boulder_01_1k.gltf",
     },
+  },
+
+  // ===================
+  // HEIGHTMAP SETTINGS
+  // ===================
+  heightmap: {
+    enabled: true, // Set to false to use procedural generation
+    heightScale: 200, // Maximum height from heightmap
+    heightOffset: 0, // Base height offset
+  },
+
+  // ===================
+  // SPLATMAP SETTINGS
+  // ===================
+  splatmap: {
+    enabled: true, // Use splatmap for terrain coloring
+    blendWithProcedural: 0.2, // 0 = pure splatmap, 1 = pure procedural
+  },
+
+  // ===================
+  // WATER SETTINGS
+  // ===================
+  waterPlane: {
+    enabled: true,
+    height: 8, // Water level height (areas below this will be water)
   },
 
   // ===================
@@ -156,6 +185,10 @@ export const config = {
     riverGrass: { r: 0.55, g: 1.4, b: 0.45 },
     warmTint: { r: 1.02, g: 1.0, b: 0.96 },
     foliage: { r: 0.55, g: 1.5, b: 0.4 },
+    // Height-based terrain colors
+    sand: { r: 1.2, g: 1.1, b: 0.8 },
+    rock: { r: 0.55, g: 0.52, b: 0.5 },
+    snow: { r: 1.3, g: 1.35, b: 1.4 },
   },
 
   // ===================
@@ -218,6 +251,21 @@ export const config = {
       aoStrength: 0.15,
     },
     contrast: 1.1,
+    // Height-based terrain blending (splatmap-like behavior)
+    heightBlend: {
+      // Beach/sand at low elevations
+      beachMax: 5,
+      beachBlend: 3,
+      // Grass zone
+      grassMin: 3,
+      grassMax: 80,
+      // Rock appears on steep slopes and high elevations
+      rockSlopeThreshold: 0.7, // Normal.y below this = rocky
+      rockHeightMin: 60,
+      // Snow at highest elevations
+      snowMin: 100,
+      snowBlend: 20,
+    },
   },
 
   // ===================
