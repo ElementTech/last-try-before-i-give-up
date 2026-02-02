@@ -3,3 +3,4 @@ dist/
 .DS_Store
 *.log
 .env
+public/models/fir_tree_01/fir_tree_01.bin
